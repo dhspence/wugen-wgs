@@ -1,4 +1,4 @@
-workflow ChromoSeq {
+workflow WugenWGS {
 
   String Cram
   String CramIndex 
@@ -15,15 +15,7 @@ workflow ChromoSeq {
   String Cytobands
   String SVDB
 
-  String CustomAnnotationVcf 
-  String CustomAnnotationIndex
-  String CustomAnnotationParameters
-
-  String HotspotVCF
   String MantaConfig
-  String MantaRegionConfig
-  
-  String HaplotectBed
   
   String Reference
   String ReferenceDict
@@ -40,11 +32,6 @@ workflow ChromoSeq {
 
   String tmp
   
-  Float minVarFreq
-  Int MinReads
-  Float varscanPvalindel
-  Float varscanPvalsnv
-
   Int MinCNASize = 5000000
   Float MinCNAabund = 5.0
   
@@ -100,12 +87,26 @@ workflow ChromoSeq {
     docker=chromoseq_docker
   }
 
+  scatter (chr in prepare_bed.chroms){
+    call count_reads {
+      input: Bam=Cram,
+      BamIndex=CramIndex,
+      ReferenceBED=ReferenceBED,
+      refFasta=Reference,
+      refIndex=ReferenceIndex,
+      Chrom=chr,
+      jobGroup=JobGroup,
+      tmp=tmp,
+      docker=chromoseq_docker
+    }
+  }
+
   call run_ichor {
     input: Bam=Cram,
     BamIndex=CramIndex,
     refFasta=Reference,
     ReferenceBED=ReferenceBED,
-    tumorCounts=TumorCounts,
+    tumorCounts=count_reads.counts_bed,
     gender=Gender,
     gcWig=gcWig,
     mapWig=mapWig,
@@ -114,67 +115,6 @@ workflow ChromoSeq {
     Name=Name,
     genomeStyle=genomeStyle,
     genome=genome,
-    queue=Queue,
-    jobGroup=JobGroup,
-    tmp=tmp,
-    docker=chromoseq_docker
-  }
-  
-  call run_varscan {
-    input: Bam=Cram,
-    BamIndex=CramIndex,
-    CoverageBed=GenesBed,
-    MinFreq=minVarFreq,
-    pvalsnv=varscanPvalsnv,
-    pvalindel=varscanPvalindel,
-    refFasta=Reference,
-    Name=Name,
-    queue=Queue,
-    jobGroup=JobGroup,
-    tmp=tmp,
-    docker=chromoseq_docker
-  }
-  
-  call run_detect_flt3itd {
-    input: Bam=Cram,
-    BamIndex=CramIndex,
-    Reg='chr13:28033848-28034451',
-    Config=MantaRegionConfig,
-    refFasta=Reference,
-    Name=Name,
-    genome=genome,
-    queue=Queue,
-    jobGroup=JobGroup,
-    tmp=tmp,
-    docker=chromoseq_docker
-  }
-
-  call combine_variants {
-    input: VCFs=[run_varscan.varscan_snv_file,
-    run_varscan.varscan_indel_file,
-    run_detect_flt3itd.vcf,
-    HotspotVCF],
-    Bam=Cram,
-    BamIndex=CramIndex,
-    refFasta=Reference,
-    Name=Name,
-    MinReads=MinReads,
-    MinVAF=minVarFreq,
-    queue=Queue,
-    jobGroup=JobGroup,
-    tmp=tmp,
-    docker=chromoseq_docker
-  }
-  
-  call annotate_variants {
-    input: Vcf=combine_variants.combined_vcf_file,
-    refFasta=Reference,
-    Vepcache=VEP,
-    Cytobands=Cytobands,
-    CustomAnnotationVcf=CustomAnnotationVcf,
-    CustomAnnotationIndex=CustomAnnotationIndex,
-    CustomAnnotationParameters=CustomAnnotationParameters,
-    Name=Name,
     queue=Queue,
     jobGroup=JobGroup,
     tmp=tmp,
@@ -200,24 +140,11 @@ workflow ChromoSeq {
     docker=chromoseq_docker
   }
   
-  call run_haplotect {
-    input: refFasta=Reference,
-    refDict=ReferenceDict,
-    Cram=Cram,
-    CramIndex=CramIndex,
-    Bed=HaplotectBed,
-    Name=Name,
-    queue=Queue,
-    jobGroup=JobGroup
-  }
-
   call make_report {
     input: SVVCF=annotate_svs.vcf,
-    GeneVCF=annotate_variants.annotated_filtered_vcf,
     KnownGenes=prepare_bed.genes,
     GeneQC=gene_qc.qc_out,
     SVQC=sv_qc.qc_out,
-    Haplotect=run_haplotect.out_file,
     MappingSummary=MappingSummary,
     CoverageSummary=CoverageSummary,
     Name=Name,
@@ -232,9 +159,6 @@ workflow ChromoSeq {
     annotate_svs.vcf_index,
     annotate_svs.allvcf,
     annotate_svs.allvcf_index,
-    run_varscan.varscan_snv_file,
-    run_varscan.varscan_indel_file,
-    run_detect_flt3itd.vcf,
     run_ichor.params,
     run_ichor.seg,
     run_ichor.genomewide_pdf,
@@ -246,10 +170,6 @@ workflow ChromoSeq {
     gene_qc.global_dist,
     sv_qc.qc_out,
     sv_qc.region_dist,
-    annotate_variants.annotated_filtered_vcf,
-    annotate_variants.annotated_filtered_vcf_index,
-    run_haplotect.out_file,
-    run_haplotect.sites_file,
     make_report.report],
     OutputDir=OutputDir,
     queue=Queue,
@@ -358,11 +278,41 @@ task run_manta {
   }
 }
 
+task count_reads {
+  String Bam
+  String BamIndex
+  String ReferenceBED
+  String Chrom
+  String jobGroup
+  String refFasta
+  String refIndex
+  String tmp
+  String docker
+  
+  command {
+    set -eo pipefail && \
+    (/usr/local/bin/bedtools makewindows -b ${ReferenceBED} -w 500000 | \
+    awk -v OFS="\t" -v C="${Chrom}" '$1==C && NF==3' > ${tmp}/${Chrom}.windows.bed) && \
+    /usr/local/bin/samtools view -b -f 0x2 -F 0x400 -q 20 -T ${refFasta} ${Bam} ${Chrom} | \
+    /usr/local/bin/intersectBed -sorted -nobuf -c -bed -b stdin -a ${tmp}/${Chrom}.windows.bed > ${Chrom}.counts.bed
+  }
+
+  runtime {
+    docker_image: docker
+    cpu: "1"
+    memory: "8 G"
+    job_group: jobGroup
+  }
+  output {
+    File counts_bed = "${Chrom}.counts.bed"
+  }
+}
+
 task run_ichor {
   String Bam
   String BamIndex
   String ReferenceBED
-  String tumorCounts
+  Array[String] tumorCounts
   String refFasta
   String Name
   String gender
@@ -380,7 +330,8 @@ task run_ichor {
   
   command <<<
     set -eo pipefail && \
-    tail -n +6 ${tumorCounts} | sort -k 1V,1 -k 2n,2 | awk -v window=500000 'BEGIN { chr=""; } { if ($1!=chr){ printf("fixedStep chrom=%s start=1 step=%d span=%d\n",$1,window,window); chr=$1; } print $5; }' > "${Name}.tumor.wig" && \
+    cat ${sep=" " tumorCounts} | sort -k 1,1V -k 2,2n | \
+    awk -v window=500000 'BEGIN { chr=""; } { if ($1!=chr){ printf("fixedStep chrom=%s start=1 step=%d span=%d\n",$1,window,window); chr=$1; } print $4; }' > "${Name}.tumor.wig" && \
     /usr/local/bin/Rscript /usr/local/bin/ichorCNA/scripts/runIchorCNA.R --id ${Name} \
     --WIG "${Name}.tumor.wig" --ploidy "c(2)" --normal "c(0.1,0.5,.85)" --maxCN 3 \
     --gcWig ${gcWig} \
