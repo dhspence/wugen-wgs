@@ -1,2 +1,2 @@
-# cle-chromoseq
-Repository for CLE ChromoSeq Assay
+# Wugen WGS assay
+Repository for Wugen WGS Assay
